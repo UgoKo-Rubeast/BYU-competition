@@ -1,4 +1,4 @@
-from . import aug3d
+from ....src.augs import aug3d
 from .mixup import Mixup
 from .cutmix import CutmixSimple
 

@@ -9,8 +9,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from src.utils.cfg import update_cfg
-from src.modules.train import train
+from past_implementation.src.utils.cfg import update_cfg
+from past_implementation.src.modules.train import train
 
 def set_seed(seed=1234):
     random.seed(seed)

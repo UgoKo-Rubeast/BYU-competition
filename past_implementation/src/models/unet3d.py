@@ -1,11 +1,12 @@
 from types import SimpleNamespace
 
+from past_implementation.src.augs import CutmixSimple, Mixup
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
 
-from src.augs import aug3d, Mixup, CutmixSimple
+from src.augs import aug3d
 
 from .layers import ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d
 from ._base import BaseModel
@@ -13,8 +14,8 @@ from ._base import BaseModel
 
 class Net(BaseModel):
     def __init__(
-        self, 
-        cfg: SimpleNamespace, 
+        self,
+        cfg: SimpleNamespace,
         inference_mode: bool = False,
         ):
         super().__init__(cfg=cfg, inference_mode=inference_mode)
@@ -28,11 +29,11 @@ class Net(BaseModel):
             self.last_channels= True
         else:
             self.last_channels= False
-        
+
         # Augs
         self.mixup = Mixup(cfg.mixup_beta)
         self.cutmix = CutmixSimple()
-        
+
         # Encoder
         self.backbone = ResnetEncoder3d(
             cfg= cfg,
@@ -71,7 +72,7 @@ class Net(BaseModel):
         return torch.flip(p, dim)
 
     def forward(self, batch):
-        
+
         # Augs
         if self.training:
             x= batch["input"].float() # bs,c,t,h,w
@@ -90,7 +91,7 @@ class Net(BaseModel):
             # Mixup
             if torch.rand(1)[0] < self.cfg.mixup_p:
                 x, y = self.mixup(x, y)
-    
+
         else:
             x= batch.float()
             x = x / 255.0
@@ -102,7 +103,7 @@ class Net(BaseModel):
         x_in = x
         x_feats = self.backbone.forward_features(x)
         x = x_feats[::-1]
-        x = x[:len(self.cfg.decoder_cfg.decoder_channels)+1] # remove unused feature maps 
+        x = x[:len(self.cfg.decoder_cfg.decoder_channels)+1] # remove unused feature maps
         x= self.decoder(x)
         x_seg= self.seg_head(x[-1])
 
@@ -136,15 +137,15 @@ class Net(BaseModel):
                 p1 = self.proc_flip(x_in, [2])
                 p2 = self.proc_flip(x_in, [3])
                 x_seg = torch.mean(torch.stack([x_seg, p1, p2]), dim=0)
-   
+
             else:
                 pass
-            
+
             return x_seg
 
 if __name__ == "__main__":
-    from src.configs.r3d200 import cfg
-    from src.models.layers import count_parameters
+    from past_implementation.src.configs.r3d200 import cfg
+    from past_implementation.src.models.layers import count_parameters
 
     m= Net(cfg=cfg)#.cuda()
     m= m.eval()
