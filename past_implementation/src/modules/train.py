@@ -16,10 +16,10 @@ from tqdm import tqdm
 
 from monai.inferers import sliding_window_inference
 
-from src.data.utils import get_dataset, get_dataloader
-from src.models.utils import get_model, ModelEMA
+from past_implementation.src.data.utils import get_dataset, get_dataloader
+from past_implementation.src.models.utils import get_model, ModelEMA
 
-from src.modules.utils import (
+from past_implementation.src.modules.utils import (
     get_optimizer,
     get_scheduler,
     batch_to_device,
@@ -28,15 +28,15 @@ from src.modules.utils import (
     save_weights,
 )
 
-from src.logging.utils import get_logger
-from src.utils.torch import nms_3d
-from src.modules.metric import score
+from past_implementation.src.logging.utils import get_logger
+from past_implementation.src.utils.torch import nms_3d
+from past_implementation.src.modules.metric import score
 
 def run_eval(model, val_ds, val_dl, val_metrics, cfg):
     if cfg.world_size > 1:
         dist.barrier()
     model.eval()
-    
+
     progress_bar = tqdm(range(len(val_dl)), disable=cfg.local_rank!=0)
     val_itr = iter(val_dl)
     val_acc= 0
@@ -52,9 +52,9 @@ def run_eval(model, val_ds, val_dl, val_metrics, cfg):
 
                 batch= next(val_itr)
                 if cfg.world_size > 1:
-                    batch = batch_to_device(batch, cfg.local_rank) 
+                    batch = batch_to_device(batch, cfg.local_rank)
                 else:
-                    batch = batch_to_device(batch, cfg.device) 
+                    batch = batch_to_device(batch, cfg.device)
 
                 # Sliding window
                 batch["input"]= batch["input"].float()
@@ -113,7 +113,7 @@ def run_eval(model, val_ds, val_dl, val_metrics, cfg):
     else:
         sol= val_ds.df.copy()
     sol= sol.rename(columns=col_map)
-    
+
     # Submission
     sub= pd.DataFrame(max_preds)
     sub["tomo_id"]= sol["tomo_id"]
@@ -159,13 +159,13 @@ def train(cfg):
 
     # Noisy volumes
     skip_tomo_ids= [
-        "tomo_08bf73", "tomo_3a0914", "tomo_9f918e", "tomo_24a095", 
-        "tomo_37c426", "tomo_692081", "tomo_b18127", "tomo_774aae", 
-        "tomo_5b359d", "tomo_6b1fd3", "tomo_146de2", "tomo_9f424e", 
-        "tomo_67ff4e", "tomo_ac4f0d", "tomo_d8c917", "tomo_f672c0", 
-        "tomo_3b8291", "tomo_ab30af", "tomo_fc1665", "tomo_648adf", 
-        "tomo_f36495", "tomo_e9fa5f", "tomo_fc90fd", "tomo_b28579", 
-        "tomo_bd42fa", "tomo_c7a40f", "tomo_1c2534", "tomo_35ec84", 
+        "tomo_08bf73", "tomo_3a0914", "tomo_9f918e", "tomo_24a095",
+        "tomo_37c426", "tomo_692081", "tomo_b18127", "tomo_774aae",
+        "tomo_5b359d", "tomo_6b1fd3", "tomo_146de2", "tomo_9f424e",
+        "tomo_67ff4e", "tomo_ac4f0d", "tomo_d8c917", "tomo_f672c0",
+        "tomo_3b8291", "tomo_ab30af", "tomo_fc1665", "tomo_648adf",
+        "tomo_f36495", "tomo_e9fa5f", "tomo_fc90fd", "tomo_b28579",
+        "tomo_bd42fa", "tomo_c7a40f", "tomo_1c2534", "tomo_35ec84",
         "tomo_ca1d13", "tomo_22976c", "tomo_2c9f35",
         ]
 
@@ -173,14 +173,14 @@ def train(cfg):
     df_train= pd.read_csv("./data/processed/folds_all.csv")
     df_train= df_train[~df_train["tomo_id"].isin(skip_tomo_ids)]
     df_train= df_train[df_train["fold"] != cfg.fold]
-    if cfg.fast_dev_run or cfg.train == False: 
+    if cfg.fast_dev_run or cfg.train == False:
         df_train= df_train.head(cfg.batch_size)
 
     train_ds= get_dataset(df_train, cfg, mode="train")
     if cfg.world_size > 1:
         sampler= DistributedSampler(
-            train_ds, 
-            num_replicas=cfg.world_size, 
+            train_ds,
+            num_replicas=cfg.world_size,
             rank=cfg.local_rank,
             )
     else:
@@ -190,7 +190,7 @@ def train(cfg):
     df_val= pd.read_csv("./data/processed/folds_all.csv")
     df_val= df_val[~df_val["tomo_id"].isin(skip_tomo_ids)]
     df_val= df_val[df_val["fold"] == cfg.fold]
-    if cfg.fast_dev_run: 
+    if cfg.fast_dev_run:
         df_val= df_val.head(cfg.batch_size)
 
     val_ds= get_dataset(df_val, cfg, mode="val")
@@ -201,8 +201,8 @@ def train(cfg):
     if cfg.world_size > 1:
         model= model.to(cfg.local_rank)
         model= DistributedDataParallel(
-            model, 
-            device_ids=[cfg.local_rank], 
+            model,
+            device_ids=[cfg.local_rank],
             )
     else:
         model.to(cfg.device)
@@ -219,7 +219,7 @@ def train(cfg):
     train_metrics= {"train": {}, "lr": None, "epoch": None}
     val_metrics= {"val": {}}
     ema_model= None
-    total_grad_norm = None    
+    total_grad_norm = None
     total_grad_norm_after_clip = None
     optimizer.zero_grad()
     i= 0
@@ -240,7 +240,7 @@ def train(cfg):
                 train_dl= get_dataloader(train_ds, cfg, sampler=sampler, mode="train")
                 val_dl= get_dataloader(val_ds, cfg, mode="val")
 
-            if cfg.local_rank == 0: 
+            if cfg.local_rank == 0:
                 train_metrics["epoch"] = epoch
 
             if cfg.local_rank == 0 and cfg.ema == True and epoch == 0:
@@ -312,14 +312,14 @@ def train(cfg):
                             if total_grad_norm_after_clip is not None:
                                 grad_norms_clipped.append(total_grad_norm_after_clip.item())
                         optimizer.step()
-                        optimizer.zero_grad() 
+                        optimizer.zero_grad()
 
                 if ema_model is not None:
                     ema_model.update(model)
 
                 if scheduler is not None:
                     scheduler.step()
-                    
+
                 # Train Logging
                 if cfg.local_rank == 0 and i % cfg.logging_steps == 0:
                     train_metrics["train"]["loss"]= np.mean(losses[-10:])
@@ -328,7 +328,7 @@ def train(cfg):
                     if cfg.track_grad_norm:
                         train_metrics["grad_norm"] = np.mean(grad_norms[-10:])
                         train_metrics["grad_norm_clipped"] = np.mean(grad_norms_clipped[-10:])
-            
+
                     # Log
                     progress_bar.set_postfix(flatten_dict(train_metrics | val_metrics))
                     logger.log(train_metrics, commit=False)
@@ -336,7 +336,7 @@ def train(cfg):
 
 
             # Run eval
-            if epoch != 0 and epoch % cfg.eval_epochs == 0: 
+            if epoch != 0 and epoch % cfg.eval_epochs == 0:
                 if ema_model is not None:
                     val_metrics= run_eval(ema_model.module, val_ds, val_dl, val_metrics, cfg)
                 else:

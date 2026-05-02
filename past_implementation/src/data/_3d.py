@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 import pandas as pd
 import numpy as np
-import scipy 
+import scipy
 from PIL import Image
 
 import torch
@@ -24,7 +24,7 @@ class CustomDataset(torch.utils.data.Dataset):
         # Keep only positive samples
         if mode == "train":
             df = df[df["coordinates"].apply(lambda x: len(eval(x))) != 0]
-        df= df.reset_index(drop=True)        
+        df= df.reset_index(drop=True)
         self.df= df
 
         # Load imgs + labels
@@ -39,7 +39,7 @@ class CustomDataset(torch.utils.data.Dataset):
             # Create kernel
             ks= cfg.kernel_size
             kernel = self._compute_kernel(
-                kernel_size= ks, 
+                kernel_size= ks,
                 kernel_type= cfg.kernel_type,
                 kernel_sigma= cfg.kernel_sigma,
                 )
@@ -47,7 +47,7 @@ class CustomDataset(torch.utils.data.Dataset):
             for row in tqdm(df.itertuples(), total=len(df), disable=self.cfg.local_rank!=0):
                 row= row._asdict()
                 row["coordinates"]= eval(row["coordinates"])
-                
+
                 # Load img
                 fpath= "{}/fold_{}/{}.npy".format(
                     cfg.data_dir,
@@ -92,7 +92,7 @@ class CustomDataset(torch.utils.data.Dataset):
 
             self.imgs= imgs
             self.labels= labels
- 
+
         self.df= df
 
     def _compute_kernel(self, kernel_size, kernel_type, kernel_sigma):
@@ -114,7 +114,7 @@ class CustomDataset(torch.utils.data.Dataset):
             raise ValueError(f"kernel_type: {kernel_type} not recognized.")
 
         return kernel
-        
+
     def _load_one(self, row):
 
         # Fpaths
@@ -149,7 +149,7 @@ class CustomDataset(torch.utils.data.Dataset):
         scales= None
 
         if self.mode == "train":
-            
+
             # Increase label size (1/8 -> 1/1)
             label= scipy.ndimage.zoom(label.copy(), (8,8,8), order=0)
 
@@ -240,7 +240,7 @@ class CustomDataset(torch.utils.data.Dataset):
 
 
 if __name__ == "__main__":
-    from src.configs.r3d200 import cfg
+    from past_implementation.src.configs.r3d200 import cfg
 
     cfg.local_rank= 0
     cfg.rescale_p = 1.0

@@ -1,4 +1,4 @@
-import torch
+import past_implementation.src.utils.torch as torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -43,25 +43,25 @@ def center_of_mass_3d(arr, kernel_size=3):
     # Crop local area
     tmp= torch.zeros((kernel_size, kernel_size, kernel_size), device=arr.device)
     tmp= arr[
-        idx_padded[0]-half:idx_padded[0]+half+1, 
-        idx_padded[1]-half:idx_padded[1]+half+1, 
+        idx_padded[0]-half:idx_padded[0]+half+1,
+        idx_padded[1]-half:idx_padded[1]+half+1,
         idx_padded[2]-half:idx_padded[2]+half+1,
         ]
 
     # ===== Calculate center of mass =====
     z_coords, y_coords, x_coords = torch.meshgrid(
-        torch.arange(tmp.size(0), device=tmp.device), 
-        torch.arange(tmp.size(1), device=tmp.device), 
-        torch.arange(tmp.size(2), device=tmp.device), 
+        torch.arange(tmp.size(0), device=tmp.device),
+        torch.arange(tmp.size(1), device=tmp.device),
+        torch.arange(tmp.size(2), device=tmp.device),
         indexing='ij',
     )
-    
+
     # Compute weighted averages for each axis
     tmp_total = torch.sum(tmp)
     weighted_z = torch.sum(z_coords * tmp) / tmp_total
     weighted_y = torch.sum(y_coords * tmp) / tmp_total
     weighted_x = torch.sum(x_coords * tmp) / tmp_total
-    
+
     # Calculate offset from center pixel
     # Note: Odd kernel size accounts for +0.5 to center pixel
     z_offset = weighted_z - kernel_size/2 + 1
