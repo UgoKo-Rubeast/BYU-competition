@@ -325,3 +325,141 @@
 
 必要なら次に、`work_breakdown.md` にそのまま貼れるように  
 **「番号付きのWBS形式」** で整形して出します。
+
+---
+
+# 3-2のWBS
+
+`3-2 unet3d.py — UNet デコーダとセグメンテーションヘッドを実装する` は、
+エンコーダ出力の受け取り仕様を先に固定し、デコーダブロック→全体組み立て→ヘッド→検証の順で分けると進めやすいです。
+
+---
+
+## チケット分割案
+
+### 3-2-1 3D Conv-BN-Act 基本ブロックを作成する
+**内容**
+- `ConvBnAct3d` を実装
+- `Conv3d -> BatchNorm3d -> ReLU` を共通化
+
+**完了条件**
+- `in/out_channels`, `kernel_size`, `padding`, `stride` を指定して生成できる
+- 入力テンソルを通して期待 shape の出力を返せる
+
+---
+
+### 3-2-2 DecoderBlock3d の upsample 経路を実装する
+**内容**
+- 1段分のデコーダブロック `DecoderBlock3d` を実装
+- upsample 後に畳み込み2層で特徴を整形
+
+**完了条件**
+- `in_channels`, `out_channels`, `scale_factor`, `upsample_mode` を受け取れる
+- skip 入力なしでも forward が動作する
+
+---
+
+### 3-2-3 DecoderBlock3d の skip 接続を実装する
+**内容**
+- upsample 後に skip とチャネル方向で結合
+- skip あり/なしの両ケースを扱う
+
+**完了条件**
+- `torch.cat([x, skip], dim=1)` 相当の結合ができる
+- skip ありのときも shape mismatch なく forward が通る
+
+---
+
+### 3-2-4 UnetDecoder3d のチャネル設計ロジックを実装する
+**内容**
+- `encoder_channels`, `decoder_channels`, `skip_channels`, `scale_factors` の対応を定義
+- `skip_channels=None` のときの既定値を実装
+
+**完了条件**
+- stage ごとの `in_channels/skip_channels/out_channels` が一意に決まる
+- チャネル定義の長さ不整合を検知できる
+
+---
+
+### 3-2-5 UnetDecoder3d の block 群を組み立てる
+**内容**
+- `ModuleList` で複数 `DecoderBlock3d` を生成
+- stage ごとの `scale_factor` を反映
+
+**完了条件**
+- `decoder_channels` の数だけ block が作成される
+- 各 block に対応するチャネル設定が反映される
+
+---
+
+### 3-2-6 UnetDecoder3d の forward を実装する
+**内容**
+- encoder 由来の multi-scale feature list を受け取って順次 decode
+- 各 stage の出力をリストで返す
+
+**完了条件**
+- 期待した順序で skip を参照して decode できる
+- 返り値として段階出力（deep supervision 用に利用可能）を得られる
+
+---
+
+### 3-2-7 SegmentationHead3d を実装する
+**内容**
+- 最終デコーダ特徴から logits を作る `Conv3d` を実装
+- 必要に応じて最終 upsample を実装
+
+**完了条件**
+- `in_channels -> out_channels` の変換ができる
+- 目標解像度に合わせた出力 shape を返せる
+
+---
+
+### 3-2-8 形状検証用の最小テストを追加する
+**内容**
+- ダミー特徴マップで `UnetDecoder3d` の forward を確認
+- `SegmentationHead3d` 接続時の最終 shape を確認
+
+**完了条件**
+- stage ごとの出力 shape を表示/検証できる
+- 最終 logits shape が期待値と一致する
+
+---
+
+### 3-2-9 設定切り替え（upsample mode / scale factor）を検証する
+**内容**
+- `deconv` と `nontrainable` など主要 upsample mode を確認
+- `scale_factors` 変更時の動作を確認
+
+**完了条件**
+- mode 切り替えで forward が安定して通る
+- scale 変更後も skip 接続込みで shape が成立する
+
+---
+
+## もう少し実務向けにまとめた版
+
+1. **共通部品 + DecoderBlock 実装**
+	- `ConvBnAct3d`, upsample, skip concat
+
+2. **UnetDecoder3d 組み立て**
+	- チャネル設計、`ModuleList` 構築、forward
+
+3. **SegmentationHead3d 実装**
+	- logits 生成、最終 upsample
+
+4. **形状検証・設定検証**
+	- ダミー入力、mode/scale 切替テスト
+
+---
+
+## おすすめの切り方
+
+- 3-2-1 共通 Conv ブロック
+- 3-2-2 DecoderBlock（upsample + conv）
+- 3-2-3 DecoderBlock（skip 接続）
+- 3-2-4 Decoder のチャネル設計
+- 3-2-5 Decoder block 構築
+- 3-2-6 Decoder forward
+- 3-2-7 SegmentationHead
+- 3-2-8 shape テスト
+- 3-2-9 mode/scale テスト
