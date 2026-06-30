@@ -463,3 +463,181 @@
 - 3-2-7 SegmentationHead
 - 3-2-8 shape テスト
 - 3-2-9 mode/scale テスト
+
+---
+
+# 3-3のWBS
+
+`3-3 unet3d.py — Net クラスを組み立てる（deep supervision は後回しでも可）` は、
+「encoder / decoder / head の接続仕様」と「学習時・推論時の返り値仕様」を先に固定してから、
+deep supervision や推論補助（flip TTA など）を段階追加すると詰まりにくいです。
+
+---
+
+## チケット分割案
+
+### 3-3-1 Net コンストラクタのI/O仕様を定義する
+**内容**
+- `Net.__init__` の引数を整理（`cfg`, `num_classes`, `in_chans`, `deep_supervision` など）
+- encoder/decoder/head が参照する主要ハイパーパラメータを確定
+
+**完了条件**
+- 最低限の引数だけで `Net` を生成できる
+- 必須/任意引数の役割が明確になっている
+
+---
+
+### 3-3-2 Encoder を Net に接続する
+**内容**
+- `ResnetEncoder3d` を `Net` 内で生成
+- `encoder.channels` を後段設計で使えるよう保持
+
+**完了条件**
+- `Net` から encoder の multi-scale features を取得できる
+- `encoder.channels` が decoder 構築に渡せる
+
+---
+
+### 3-3-3 Decoder を Net に接続する
+**内容**
+- `UnetDecoder3d` を `encoder.channels` 基準で生成
+- `decoder_channels`, `skip_channels`, `scale_factors` を構成可能にする
+
+**完了条件**
+- encoder 出力を decoder に渡して stage 出力を得られる
+- チャネル不整合時に早期に検知できる
+
+---
+
+### 3-3-4 メイン SegmentationHead を接続する
+**内容**
+- 最終 decoder 出力に対する `SegmentationHead3d` を生成
+- `num_classes` に応じた出力チャネルへ変換
+
+**完了条件**
+- `forward` の主出力 logits を得られる
+- 最終解像度が想定どおりに合う
+
+---
+
+### 3-3-5 forward の基本経路を実装する
+**内容**
+- `x -> encoder.forward_features -> decoder -> head` の最短経路を実装
+- 最低限、推論時に logits を返す
+
+**完了条件**
+- ダミー入力で `Net.forward(x)` が通る
+- 返り値 shape が設定と一致する
+
+---
+
+### 3-3-6 deep supervision 用の補助 head 群を実装する
+**内容**
+- decoder の中間段に対応する補助 `SegmentationHead3d`（`ModuleList`）を追加
+- どの stage を supervision 対象にするかを明示
+
+**完了条件**
+- 補助 head の個数と対象 stage が一致する
+- 全補助 head が forward 可能
+
+---
+
+### 3-3-7 deep supervision 出力の整形を実装する
+**内容**
+- 補助 logits を同一解像度へ resize（必要に応じて）
+- 損失計算しやすいリスト順序を統一
+
+**完了条件**
+- main + aux logits の解像度/順序が規約どおり
+- 学習側がそのまま損失計算に使える
+
+---
+
+### 3-3-8 学習時/推論時の返り値仕様を分岐する
+**内容**
+- `self.training` または `return_dict` フラグで返り値を制御
+- 例: 学習時は `{main, aux}`、推論時は `main` のみ
+
+**完了条件**
+- 学習コードと推論コード双方で扱いやすい返り値になる
+- 既存 train loop と整合する
+
+---
+
+### 3-3-9 upsample / interpolation の最終整合を実装する
+**内容**
+- 入力深さ・空間サイズと出力サイズの整合を保証
+- 奇数サイズ入力時の丸め誤差ケースを吸収
+
+**完了条件**
+- 代表的な入力サイズで shape mismatch が発生しない
+- loss 計算直前の target 形状と合わせられる
+
+---
+
+### 3-3-10 推論補助（任意）を Net 側に追加する
+**内容**
+- flip TTA など軽量推論補助を `Net` メソッドとして実装（必要なら）
+- `forward` 本体を汚さない構成に分離
+
+**完了条件**
+- 補助推論の on/off が切り替え可能
+- 通常推論との互換性が保たれる
+
+---
+
+### 3-3-11 重み初期化と互換ロードを整備する
+**内容**
+- head / aux head の初期化方針を統一
+- deep supervision 有無で state_dict 互換ロード方針を決める
+
+**完了条件**
+- `strict=False` での安全なロード戦略がある
+- 学習再開時の欠落キーが想定内に収まる
+
+---
+
+### 3-3-12 最小動作テストを追加する
+**内容**
+- ダミー入力で train/eval 両モードを確認
+- deep supervision on/off で返り値と shape を検証
+
+**完了条件**
+- 主要分岐（通常・DSあり・DSなし）が単体で通る
+- 返り値仕様がドキュメント化される
+
+---
+
+## もう少し実務向けにまとめた版
+
+1. **Net 骨格実装**
+	- encoder/decoder/head の接続
+
+2. **forward 本線実装**
+	- 学習・推論の基本 logits 出力
+
+3. **deep supervision 実装**
+	- aux head 構築、出力整形、返り値統一
+
+4. **推論補助と互換性対応**
+	- TTA（任意）、state_dict 互換ロード
+
+5. **最小テスト整備**
+	- train/eval、DS on/off、shape 検証
+
+---
+
+## おすすめの切り方
+
+- 3-3-1 コンストラクタI/O仕様
+- 3-3-2 encoder 接続
+- 3-3-3 decoder 接続
+- 3-3-4 main head 接続
+- 3-3-5 基本 forward
+- 3-3-6 deep supervision head 群
+- 3-3-7 DS 出力整形
+- 3-3-8 学習/推論 返り値分岐
+- 3-3-9 最終 shape 整合
+- 3-3-10 推論補助（任意）
+- 3-3-11 重み初期化/互換ロード
+- 3-3-12 最小動作テスト
