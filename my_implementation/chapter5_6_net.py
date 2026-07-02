@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
@@ -83,7 +84,10 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
 
             if self.deep_supervision:
                 default_stages = (1,)
-                self.deep_supervision_stages = tuple(getattr(self.cfg, "deep_supervision_stages", default_stages))
+                # 3-3-7: keep deterministic stage order for loss calculation.
+                self.deep_supervision_stages = tuple(
+                    sorted(set(getattr(self.cfg, "deep_supervision_stages", default_stages)))
+                )
 
                 max_valid = len(self.decoder_channels) - 1
                 for stage in self.deep_supervision_stages:
@@ -118,11 +122,20 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
                 "decoder_input_channels": self.decoder_encoder_channels,
             }
 
-        def forward_aux_heads(self, decoded):
+        def forward_aux_heads(self, decoded, output_size=None):
             aux_logits = []
             for stage, head in zip(self.deep_supervision_stages, self.aux_heads):
-                aux_logits.append(head(decoded[-1 - stage]))
+                aux = head(decoded[-1 - stage])
+                # 3-3-7: unify aux-logits spatial size to make loss computation straightforward.
+                if output_size is not None and aux.shape[2:] != output_size:
+                    aux = F.interpolate(aux, size=output_size, mode="trilinear", align_corners=False)
+                aux_logits.append(aux)
             return aux_logits
+
+        def build_deep_supervision_outputs(self, decoded, main_logits):
+            """Return [main, aux1, aux2, ...] with unified resolution and deterministic order."""
+            aux_logits = self.forward_aux_heads(decoded, output_size=main_logits.shape[2:])
+            return [main_logits] + aux_logits
 
         def get_deep_supervision_spec(self):
             return {
@@ -295,3 +308,31 @@ def run_section_5_6_assertions(Net):
 
     print("[3-3-6/aux_shapes]", [tuple(x.shape) for x in aux_logits_336])
     print("[3-3-6/spec]", net_336.get_deep_supervision_spec())
+
+    # 3-3-7 validation A: deep supervision stage order is normalized
+    cfg_337 = SimpleNamespace(
+        backbone="r3d18",
+        in_chans=1,
+        seg_classes=2,
+        deep_supervision=True,
+        deep_supervision_stages=(2, 1),
+        head_scale_factor=(1, 1, 1),
+    )
+    net_337 = Net(cfg_337, inference_mode=True).eval()
+    assert net_337.deep_supervision_stages == (1, 2)
+
+    # 3-3-7 validation B: main + aux outputs are returned in unified resolution and fixed order
+    with torch.no_grad():
+        x_337 = torch.randn(2, 1, 32, 96, 96)
+        feats_337 = net_337.forward_encoder_features(x_337)
+        decoded_337 = net_337.decoder(list(feats_337[::-1])[: len(net_337.decoder_channels) + 1])
+        main_337 = net_337.seg_head(decoded_337[-1])
+        ds_outputs_337 = net_337.build_deep_supervision_outputs(decoded_337, main_337)
+
+    assert len(ds_outputs_337) == 1 + len(net_337.aux_heads)
+    assert ds_outputs_337[0].shape == main_337.shape
+    assert all(x.shape[2:] == main_337.shape[2:] for x in ds_outputs_337[1:])
+    assert [x.shape[1] for x in ds_outputs_337] == [net_337.num_classes] * len(ds_outputs_337)
+
+    print("[3-3-7/stages]", net_337.deep_supervision_stages)
+    print("[3-3-7/ds_shapes]", [tuple(x.shape) for x in ds_outputs_337])
