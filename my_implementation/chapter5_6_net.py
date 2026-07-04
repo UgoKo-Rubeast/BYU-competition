@@ -137,6 +137,32 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
             aux_logits = self.forward_aux_heads(decoded, output_size=main_logits.shape[2:])
             return [main_logits] + aux_logits
 
+        def _resize_logits_if_needed(self, logits, output_size):
+            if output_size is None or logits.shape[2:] == tuple(output_size):
+                return logits
+            return F.interpolate(logits, size=tuple(output_size), mode="trilinear", align_corners=False)
+
+        def _align_feature_size(self, feat, size):
+            if feat.shape[2:] == tuple(size):
+                return feat
+            return F.interpolate(feat, size=tuple(size), mode="trilinear", align_corners=False)
+
+        def _prepare_decoder_inputs(self, encoder_features):
+            """3-3-9: align skip feature shapes for odd-size inputs before decoder forward."""
+            decoder_inputs = list(encoder_features[::-1])[: len(self.decoder_channels) + 1]
+            if len(decoder_inputs) <= 1:
+                return decoder_inputs
+
+            cur_size = tuple(decoder_inputs[0].shape[2:])
+            aligned = [decoder_inputs[0]]
+            for i in range(1, len(decoder_inputs)):
+                sf = int(self.scale_factors[i - 1]) if i - 1 < len(self.scale_factors) else 2
+                target_size = tuple(max(1, s * sf) for s in cur_size)
+                aligned_skip = self._align_feature_size(decoder_inputs[i], target_size)
+                aligned.append(aligned_skip)
+                cur_size = target_size
+            return aligned
+
         def get_deep_supervision_spec(self):
             return {
                 "enabled": self.deep_supervision,
@@ -147,10 +173,13 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
                 ],
             }
 
-        def _format_outputs(self, main_logits, decoded, return_dict=None):
+        def _format_outputs(self, main_logits, decoded, return_dict=None, output_size=None):
             # 3-3-8: default behavior is train=dict(deep supervision info), eval=tensor(main only).
             if return_dict is None:
                 return_dict = bool(self.training)
+
+            if output_size is not None:
+                main_logits = self._resize_logits_if_needed(main_logits, output_size)
 
             if not return_dict:
                 return main_logits
@@ -166,8 +195,10 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
 
         def forward(self, batch, return_dict=None):
             """3-3-5/3-3-8: basic path + train/infer return branching."""
+            target = None
             if isinstance(batch, dict):
                 x = batch["input"]
+                target = batch.get("target")
             else:
                 x = batch
 
@@ -176,10 +207,18 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
 
             x = x.float()
             encoder_features = self.forward_encoder_features(x)
-            decoder_inputs = list(encoder_features[::-1])[: len(self.decoder_channels) + 1]
+            decoder_inputs = self._prepare_decoder_inputs(encoder_features)
             decoded = self.decoder(decoder_inputs)
             main_logits = self.seg_head(decoded[-1])
-            return self._format_outputs(main_logits, decoded, return_dict=return_dict)
+
+            # 3-3-9: enforce final shape consistency for odd sizes and loss-target compatibility.
+            output_size = target.shape[2:] if torch.is_tensor(target) else x.shape[2:]
+            return self._format_outputs(
+                main_logits,
+                decoded,
+                return_dict=return_dict,
+                output_size=output_size,
+            )
 
     return Net
 
@@ -379,3 +418,35 @@ def run_section_5_6_assertions(Net):
     print("[3-3-8/train_keys]", list(out_train.keys()))
     print("[3-3-8/eval_main_shape]", tuple(out_eval.shape))
     print("[3-3-8/override_eval_dict_keys]", list(out_eval_dict.keys()))
+
+    # 3-3-9 validation A: odd-size input should return output aligned to input size
+    cfg_339_odd = SimpleNamespace(
+        backbone="r3d18",
+        in_chans=1,
+        seg_classes=2,
+        deep_supervision=False,
+    )
+    net_339_odd = Net(cfg_339_odd, inference_mode=True).eval()
+    x_odd = torch.randn(2, 1, 17, 95, 97)
+    with torch.no_grad():
+        logits_odd = net_339_odd(x_odd)
+    assert logits_odd.shape[2:] == x_odd.shape[2:]
+
+    # 3-3-9 validation B: dict input with target should align output size to target for loss compatibility
+    cfg_339_ds = SimpleNamespace(
+        backbone="r3d18",
+        in_chans=1,
+        seg_classes=2,
+        deep_supervision=True,
+        deep_supervision_stages=(1, 2),
+    )
+    net_339_ds = Net(cfg_339_ds, inference_mode=True).train()
+    x_339 = torch.randn(2, 1, 19, 93, 91)
+    target_339 = torch.randn(2, 1, 16, 96, 96)
+    out_339 = net_339_ds({"input": x_339, "target": target_339})
+    assert isinstance(out_339, dict)
+    assert out_339["main"].shape[2:] == target_339.shape[2:]
+    assert all(aux.shape[2:] == target_339.shape[2:] for aux in out_339["aux"])
+
+    print("[3-3-9/odd_input_out_shape]", tuple(logits_odd.shape))
+    print("[3-3-9/target_aligned_main_shape]", tuple(out_339["main"].shape))
