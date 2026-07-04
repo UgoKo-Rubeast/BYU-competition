@@ -147,8 +147,25 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
                 ],
             }
 
-        def forward(self, batch):
-            """3-3-5: basic path x -> encoder features -> decoder -> segmentation head."""
+        def _format_outputs(self, main_logits, decoded, return_dict=None):
+            # 3-3-8: default behavior is train=dict(deep supervision info), eval=tensor(main only).
+            if return_dict is None:
+                return_dict = bool(self.training)
+
+            if not return_dict:
+                return main_logits
+
+            outputs = {"main": main_logits}
+            if self.deep_supervision:
+                outputs["aux"] = self.forward_aux_heads(decoded, output_size=main_logits.shape[2:])
+                outputs["all"] = [main_logits] + outputs["aux"]
+            else:
+                outputs["aux"] = []
+                outputs["all"] = [main_logits]
+            return outputs
+
+        def forward(self, batch, return_dict=None):
+            """3-3-5/3-3-8: basic path + train/infer return branching."""
             if isinstance(batch, dict):
                 x = batch["input"]
             else:
@@ -161,8 +178,8 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
             encoder_features = self.forward_encoder_features(x)
             decoder_inputs = list(encoder_features[::-1])[: len(self.decoder_channels) + 1]
             decoded = self.decoder(decoder_inputs)
-            logits = self.seg_head(decoded[-1])
-            return logits
+            main_logits = self.seg_head(decoded[-1])
+            return self._format_outputs(main_logits, decoded, return_dict=return_dict)
 
     return Net
 
@@ -336,3 +353,29 @@ def run_section_5_6_assertions(Net):
 
     print("[3-3-7/stages]", net_337.deep_supervision_stages)
     print("[3-3-7/ds_shapes]", [tuple(x.shape) for x in ds_outputs_337])
+
+    # 3-3-8 validation A: training mode returns dict by default
+    net_338_train = Net(cfg_337, inference_mode=True).train()
+    out_train = net_338_train(torch.randn(2, 1, 32, 96, 96))
+    assert isinstance(out_train, dict)
+    assert set(out_train.keys()) == {"main", "aux", "all"}
+    assert out_train["all"][0].shape == out_train["main"].shape
+    assert len(out_train["aux"]) == len(net_338_train.aux_heads)
+
+    # 3-3-8 validation B: eval mode returns main tensor by default
+    net_338_eval = Net(cfg_337, inference_mode=True).eval()
+    with torch.no_grad():
+        out_eval = net_338_eval(torch.randn(2, 1, 32, 96, 96))
+    assert torch.is_tensor(out_eval)
+    assert out_eval.shape[1] == net_338_eval.num_classes
+
+    # 3-3-8 validation C: explicit return_dict flag overrides default behavior
+    with torch.no_grad():
+        out_eval_dict = net_338_eval(torch.randn(2, 1, 32, 96, 96), return_dict=True)
+    assert isinstance(out_eval_dict, dict)
+    out_train_tensor = net_338_train(torch.randn(2, 1, 32, 96, 96), return_dict=False)
+    assert torch.is_tensor(out_train_tensor)
+
+    print("[3-3-8/train_keys]", list(out_train.keys()))
+    print("[3-3-8/eval_main_shape]", tuple(out_eval.shape))
+    print("[3-3-8/override_eval_dict_keys]", list(out_eval_dict.keys()))
