@@ -41,6 +41,7 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
 
             self.head_scale_factor = tuple(getattr(cfg, "head_scale_factor", (2, 2, 2)))
             self.head_upsample_mode = str(getattr(cfg, "head_upsample_mode", "nontrainable"))
+            self.tta_flip_dims = tuple(getattr(cfg, "tta_flip_dims", ((3,), (4,), (3, 4))))
 
             self.io_spec = {
                 "required": ["cfg.backbone"],
@@ -54,6 +55,7 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
                     "upsample_mode": self.upsample_mode,
                     "head_scale_factor": self.head_scale_factor,
                     "head_upsample_mode": self.head_upsample_mode,
+                    "tta_flip_dims": self.tta_flip_dims,
                     "inference_mode": self.inference_mode,
                 },
             }
@@ -192,6 +194,47 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
                 outputs["aux"] = []
                 outputs["all"] = [main_logits]
             return outputs
+
+        def _normalize_tta_flip_dims(self, x, tta_flip_dims):
+            normalized = []
+            for dims in tta_flip_dims:
+                dims_tuple = tuple(sorted(set(int(d) for d in dims)))
+                if any(d < 2 or d >= x.ndim for d in dims_tuple):
+                    raise ValueError(f"tta_flip_dims must be within spatial dims [2, {x.ndim - 1}], got={dims_tuple}")
+                normalized.append(dims_tuple)
+            return normalized
+
+        def predict(self, batch, use_tta=False, tta_flip_dims=None):
+            """3-3-10: inference helper with optional flip TTA, separated from forward."""
+            if isinstance(batch, dict):
+                x = batch["input"]
+            else:
+                x = batch
+
+            if not torch.is_tensor(x):
+                raise TypeError("predict input must be a torch.Tensor or a dict containing key 'input'")
+
+            x = x.float()
+            tta_flip_dims = self.tta_flip_dims if tta_flip_dims is None else tta_flip_dims
+            tta_flip_dims = self._normalize_tta_flip_dims(x, tta_flip_dims)
+
+            was_training = self.training
+            self.eval()
+            try:
+                with torch.no_grad():
+                    main_logits = self.forward(x, return_dict=False)
+                    if not use_tta:
+                        return main_logits
+
+                    logits_list = [main_logits]
+                    for dims in tta_flip_dims:
+                        x_flip = torch.flip(x, dims=dims)
+                        y_flip = self.forward(x_flip, return_dict=False)
+                        y = torch.flip(y_flip, dims=dims)
+                        logits_list.append(y)
+                    return torch.stack(logits_list, dim=0).mean(dim=0)
+            finally:
+                self.train(was_training)
 
         def forward(self, batch, return_dict=None):
             """3-3-5/3-3-8: basic path + train/infer return branching."""
@@ -450,3 +493,25 @@ def run_section_5_6_assertions(Net):
 
     print("[3-3-9/odd_input_out_shape]", tuple(logits_odd.shape))
     print("[3-3-9/target_aligned_main_shape]", tuple(out_339["main"].shape))
+
+    # 3-3-10 validation A: inference helper without TTA matches forward shape
+    net_3310 = Net(cfg_339_ds, inference_mode=True).eval()
+    x_3310 = torch.randn(2, 1, 19, 93, 91)
+    with torch.no_grad():
+        pred_no_tta = net_3310.predict(x_3310, use_tta=False)
+        ref_no_tta = net_3310(x_3310, return_dict=False)
+    assert pred_no_tta.shape == ref_no_tta.shape
+
+    # 3-3-10 validation B: flip TTA ON/OFF can be switched and keeps shape
+    with torch.no_grad():
+        pred_tta = net_3310.predict(x_3310, use_tta=True)
+    assert pred_tta.shape == pred_no_tta.shape
+    assert torch.isfinite(pred_tta).all()
+
+    # 3-3-10 validation C: dict input path and custom tta dims
+    with torch.no_grad():
+        pred_dict = net_3310.predict({"input": x_3310}, use_tta=True, tta_flip_dims=((3,), (4,)))
+    assert pred_dict.shape == pred_no_tta.shape
+
+    print("[3-3-10/no_tta_shape]", tuple(pred_no_tta.shape))
+    print("[3-3-10/tta_shape]", tuple(pred_tta.shape))
