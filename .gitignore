@@ -2,3 +2,4 @@ docs
 train_data
 processed_tomos
 *.pyc
+.DS_Store
