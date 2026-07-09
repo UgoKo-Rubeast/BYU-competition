@@ -113,6 +113,9 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
                 self.deep_supervision_stages = tuple()
                 self.aux_heads = nn.ModuleList()
 
+            # 3-3-11: keep head initialization policy explicit and consistent.
+            self._initialize_prediction_heads()
+
         def forward_encoder_features(self, x):
             """Return encoder multi-scale features in stem->stage4 order."""
             return self.encoder.forward_features(x)
@@ -138,6 +141,26 @@ def build_net_class(ResnetEncoder3d, UnetDecoder3d, SegmentationHead3d):
             """Return [main, aux1, aux2, ...] with unified resolution and deterministic order."""
             aux_logits = self.forward_aux_heads(decoded, output_size=main_logits.shape[2:])
             return [main_logits] + aux_logits
+
+        def _initialize_prediction_heads(self):
+            def _init_module(module):
+                for m in module.modules():
+                    if isinstance(m, nn.Conv3d):
+                        nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                        if m.bias is not None:
+                            nn.init.zeros_(m.bias)
+
+            _init_module(self.seg_head)
+            for head in self.aux_heads:
+                _init_module(head)
+
+        def load_flexible_state_dict(self, state_dict, strict=False):
+            """3-3-11: safe compatibility loader for DS on/off checkpoints."""
+            incompatible = self.load_state_dict(state_dict, strict=strict)
+            return {
+                "missing_keys": list(incompatible.missing_keys),
+                "unexpected_keys": list(incompatible.unexpected_keys),
+            }
 
         def _resize_logits_if_needed(self, logits, output_size):
             if output_size is None or logits.shape[2:] == tuple(output_size):
@@ -515,3 +538,35 @@ def run_section_5_6_assertions(Net):
 
     print("[3-3-10/no_tta_shape]", tuple(pred_no_tta.shape))
     print("[3-3-10/tta_shape]", tuple(pred_tta.shape))
+
+    # 3-3-11 validation A: head and aux-head weights are initialized
+    cfg_3311_no_ds = SimpleNamespace(
+        backbone="r3d18",
+        in_chans=1,
+        seg_classes=2,
+        deep_supervision=False,
+    )
+    cfg_3311_ds = SimpleNamespace(
+        backbone="r3d18",
+        in_chans=1,
+        seg_classes=2,
+        deep_supervision=True,
+        deep_supervision_stages=(1, 2),
+    )
+    net_3311_no_ds = Net(cfg_3311_no_ds, inference_mode=True)
+    net_3311_ds = Net(cfg_3311_ds, inference_mode=True)
+    assert torch.count_nonzero(net_3311_no_ds.seg_head.conv.weight).item() > 0
+    assert all(torch.count_nonzero(h.conv.weight).item() > 0 for h in net_3311_ds.aux_heads)
+
+    # 3-3-11 validation B: strict=False load is compatible across DS off -> DS on
+    report_no_to_ds = net_3311_ds.load_flexible_state_dict(net_3311_no_ds.state_dict(), strict=False)
+    assert all(k.startswith("aux_heads.") for k in report_no_to_ds["missing_keys"])
+    assert len(report_no_to_ds["unexpected_keys"]) == 0
+
+    # 3-3-11 validation C: strict=False load is compatible across DS on -> DS off
+    report_ds_to_no = net_3311_no_ds.load_flexible_state_dict(net_3311_ds.state_dict(), strict=False)
+    assert len(report_ds_to_no["missing_keys"]) == 0
+    assert all(k.startswith("aux_heads.") for k in report_ds_to_no["unexpected_keys"])
+
+    print("[3-3-11/no_to_ds_missing]", report_no_to_ds["missing_keys"])
+    print("[3-3-11/ds_to_no_unexpected]", report_ds_to_no["unexpected_keys"])
