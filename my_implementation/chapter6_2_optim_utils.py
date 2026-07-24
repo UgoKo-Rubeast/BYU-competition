@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -54,6 +55,45 @@ def clip_grad_and_measure(model, max_norm, norm_type=2.0):
     return before, after
 
 
+class ModelEMA(nn.Module):
+    """Exponential moving average wrapper for model weights."""
+
+    def __init__(self, model, decay=0.9999, device=None):
+        super().__init__()
+        self.module = deepcopy(_unwrap_model(model)).eval()
+        self.decay = float(decay)
+        self.device = device
+        if self.device is not None:
+            self.module.to(device=self.device)
+
+    @staticmethod
+    def _state_dict_items(m):
+        return m.state_dict().values()
+
+    def _update(self, model, update_fn):
+        model = _unwrap_model(model)
+        with torch.no_grad():
+            for ema_v, model_v in zip(self._state_dict_items(self.module), self._state_dict_items(model)):
+                if self.device is not None:
+                    model_v = model_v.to(self.device)
+
+                if torch.is_floating_point(ema_v):
+                    ema_v.copy_(update_fn(ema_v, model_v.to(dtype=ema_v.dtype)))
+                else:
+                    # Integer buffers (e.g. num_batches_tracked) should follow model directly.
+                    ema_v.copy_(model_v)
+
+    def update(self, model):
+        self._update(model, update_fn=lambda e, m: self.decay * e + (1.0 - self.decay) * m)
+
+    def set(self, model):
+        self._update(model, update_fn=lambda e, m: m)
+
+
+def _unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
+
+
 def run_section_6_2_assertions():
     class TinyNet(nn.Module):
         def __init__(self):
@@ -92,8 +132,28 @@ def run_section_6_2_assertions():
     assert before is not None and after is not None
     assert float(after) <= float(before) + 1e-8
 
+    # 4-5 validation A: EMA should initialize from current model weights.
+    ema = ModelEMA(model, decay=0.9)
+    assert torch.allclose(ema.module.conv.weight, model.conv.weight)
+
+    # 4-5 validation B: EMA update should move toward updated model weights.
+    old_ema_w = ema.module.conv.weight.detach().clone()
+    with torch.no_grad():
+        model.conv.weight.add_(1.0)
+    ema.update(model)
+    expected = 0.9 * old_ema_w + 0.1 * model.conv.weight.detach()
+    assert torch.allclose(ema.module.conv.weight, expected, atol=1e-6)
+
+    # 4-5 validation C: set() should hard-copy model weights.
+    with torch.no_grad():
+        model.conv.bias.fill_(0.25)
+    ema.set(model)
+    assert torch.allclose(ema.module.conv.bias, model.conv.bias)
+
     print("[4-2/optimizer]", type(opt).__name__)
     print("[4-2/scheduler_constant]", type(sch_const).__name__)
     print("[4-2/scheduler_cosine]", type(sch_cos).__name__)
     print("[4-2/lr_before_after]", float(lr_before), float(lr_after))
     print("[4-2/grad_norm_before_after]", float(before), float(after))
+    print("[4-5/ema_decay]", ema.decay)
+    print("[4-5/ema_weight_mean]", float(ema.module.conv.weight.mean()))
