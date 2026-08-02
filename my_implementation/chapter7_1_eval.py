@@ -124,6 +124,8 @@ def run_eval(model, val_dl, cfg, val_metrics=None):
     sw_batch_size = int(getattr(cfg, "sw_batch_size", 1))
     use_amp = bool(getattr(cfg, "mixed_precision", False))
     disable_tqdm = bool(getattr(cfg, "disable_tqdm", True))
+    use_tta = bool(getattr(cfg, "use_tta", False))
+    tta_flip_dims = getattr(cfg, "tta_flip_dims", None)
 
     wrapped = _unwrap_model(model)
     loss_fn = getattr(wrapped, "loss_fn", None)
@@ -143,6 +145,10 @@ def run_eval(model, val_dl, cfg, val_metrics=None):
             target = batch.get("target", None)
 
             def predictor(x):
+                base_model = _unwrap_model(model)
+                if use_tta and hasattr(base_model, "predict") and callable(getattr(base_model, "predict")):
+                    y = base_model.predict(x, use_tta=True, tta_flip_dims=tta_flip_dims)
+                    return _extract_logits(y)
                 return _extract_logits(model(x))
 
             if use_amp and device.type != "cpu":
@@ -194,6 +200,7 @@ def run_eval(model, val_dl, cfg, val_metrics=None):
     val_metrics = dict(val_metrics)
     val_metrics.setdefault("val", {})
     val_metrics["val"]["n_samples"] = len(max_preds)
+    val_metrics["val"]["used_tta"] = bool(use_tta)
     if losses:
         val_metrics["val"]["loss"] = float(np.mean(losses))
     if max_preds:
@@ -228,6 +235,30 @@ class _TinyEvalModel(nn.Module):
         return self.conv(x)
 
 
+class _TinyEvalModelWithPredict(_TinyEvalModel):
+    def __init__(self):
+        super().__init__()
+        self.predict_calls = 0
+
+    def predict(self, x, use_tta=False, tta_flip_dims=None):
+        self.predict_calls += 1
+        base = self.forward(x)
+        if not use_tta:
+            return base
+
+        if tta_flip_dims is None:
+            tta_flip_dims = ((2,), (3,), (4,), (3, 4))
+
+        logits = [base]
+        for dims in tta_flip_dims:
+            dims_tuple = tuple(int(d) for d in dims)
+            x_flip = torch.flip(x, dims=dims_tuple)
+            y_flip = self.forward(x_flip)
+            y = torch.flip(y_flip, dims=dims_tuple)
+            logits.append(y)
+        return torch.stack(logits, dim=0).mean(dim=0)
+
+
 def run_section_5_1_assertions():
     torch.manual_seed(123)
 
@@ -241,6 +272,7 @@ def run_section_5_1_assertions():
         overlap=0.25,
         sw_batch_size=1,
         mixed_precision=False,
+        use_tta=False,
         disable_tqdm=True,
     )
 
@@ -250,6 +282,7 @@ def run_section_5_1_assertions():
     assert "val" in out
     assert out["val"]["n_samples"] == len(ds)
     assert "loss" in out["val"] and np.isfinite(out["val"]["loss"])
+    assert out["val"]["used_tta"] is False
 
     # 5-1 validation B: one argmax prediction per sample with valid coordinates.
     assert len(out["max_preds"]) == len(ds)
@@ -266,12 +299,32 @@ def run_section_5_1_assertions():
         overlap=0.5,
         sw_batch_size=1,
         mixed_precision=False,
+        use_tta=False,
         disable_tqdm=True,
     )
     out_alt = run_eval(model, dl, cfg_alt, val_metrics={"val": {}})
     assert set(out_alt.keys()) == {"val", "max_preds"}
     assert "mean_max_prob" in out_alt["val"]
 
+    # 5-4 validation A/B: Flip TTA path uses predict(...) when available.
+    model_tta = _TinyEvalModelWithPredict().eval()
+    cfg_tta = SimpleNamespace(
+        device=torch.device("cpu"),
+        roi_size=(8, 16, 16),
+        overlap=0.25,
+        sw_batch_size=1,
+        mixed_precision=False,
+        use_tta=True,
+        tta_flip_dims=((2,), (3,), (4,)),
+        disable_tqdm=True,
+    )
+    out_tta = run_eval(model_tta, dl, cfg_tta, val_metrics={"val": {}})
+    assert out_tta["val"]["used_tta"] is True
+    assert model_tta.predict_calls > 0
+    assert len(out_tta["max_preds"]) == len(ds)
+
     print("[5-1/n_samples]", out["val"]["n_samples"])
     print("[5-1/loss]", out["val"]["loss"])
     print("[5-1/mean_max_prob]", out["val"]["mean_max_prob"])
+    print("[5-4/used_tta]", out_tta["val"]["used_tta"])
+    print("[5-4/predict_calls]", model_tta.predict_calls)
