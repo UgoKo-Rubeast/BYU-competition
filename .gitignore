@@ -1,5 +1,6 @@
 docs
 train_data
+eval_data
 processed_tomos
 *.pyc
 .DS_Store
